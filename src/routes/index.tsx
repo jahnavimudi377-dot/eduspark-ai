@@ -128,6 +128,19 @@ function CreatePage() {
     };
   }, [videoUrl]);
 
+  // Pick up a template prompt forwarded from /templates
+  useEffect(() => {
+    try {
+      const pre = sessionStorage.getItem("eduverse.prefill");
+      if (pre) {
+        setPrompt(pre);
+        sessionStorage.removeItem("eduverse.prefill");
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
   const activeStageIdx = useMemo(() => {
     if (state !== "running") return -1;
     if (progress < 8) return 0;
