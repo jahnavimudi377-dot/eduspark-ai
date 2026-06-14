@@ -69,7 +69,17 @@ export function AppShell({ children }: { children?: ReactNode }) {
           <div className="mt-2 text-xs text-muted-foreground">
             4K renders, unlimited voices, priority queue.
           </div>
-          <button className="mt-3 w-full rounded-lg bg-gradient-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground shadow-glow">
+          <button
+            type="button"
+            onClick={() => {
+              import("sonner").then(({ toast }) =>
+                toast.success("You're already on the Pro plan", {
+                  description: "All features unlocked.",
+                }),
+              );
+            }}
+            className="mt-3 w-full rounded-lg bg-gradient-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground shadow-glow"
+          >
             Upgrade
           </button>
         </div>
