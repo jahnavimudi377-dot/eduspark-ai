@@ -26,6 +26,14 @@ const T = [
 
 function TemplatesPage() {
   const navigate = useNavigate();
+  const useTemplate = (p: string) => {
+    try {
+      sessionStorage.setItem("eduverse.prefill", p);
+    } catch {
+      // ignore
+    }
+    navigate({ to: "/" });
+  };
 
   return (
     <AppShell>
@@ -41,9 +49,7 @@ function TemplatesPage() {
             <button
               type="button"
               key={t.name}
-              onClick={() =>
-                navigate({ to: "/", search: { template: t.prompt } as never })
-              }
+              onClick={() => useTemplate(t.prompt)}
               className="group cursor-pointer overflow-hidden rounded-2xl glass-strong text-left transition hover:shadow-glow"
             >
               <div className={`relative aspect-video bg-gradient-to-br ${t.gradient}`}>
