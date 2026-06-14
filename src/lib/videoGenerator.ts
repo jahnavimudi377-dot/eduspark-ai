@@ -153,7 +153,7 @@ function drawScene(
   const titleMetrics = ctx.measureText(title);
   const titleW = Math.min(titleMetrics.width + titlePadding * 2, w * 0.8);
   ctx.beginPath();
-  // @ts-expect-error roundRect exists in modern browsers
+  // roundRect available in modern browsers
   ctx.roundRect(w / 2 - titleW / 2, h * 0.05, titleW, titleFontSize * 1.8, 12);
   ctx.fill();
   ctx.fillStyle = "#ffffff";
@@ -175,7 +175,7 @@ function drawScene(
   const pad = captionFontSize * 0.6;
   const maxLineW = Math.max(...lines.map((l) => ctx.measureText(l).width));
   ctx.beginPath();
-  // @ts-expect-error roundRect
+  // roundRect
   ctx.roundRect(
     w / 2 - maxLineW / 2 - pad,
     captionY - pad,
