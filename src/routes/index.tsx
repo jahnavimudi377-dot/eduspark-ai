@@ -1,5 +1,6 @@
-import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { createFileRoute, Link } from "@tanstack/react-router";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
 import {
   Sparkles,
   Wand2,
@@ -22,9 +23,17 @@ import {
   Dna,
   Landmark,
   Coins,
+  RotateCcw,
+  CheckCircle2,
+  Link as LinkIcon,
+  AlertTriangle,
+  X,
+  FolderOpen,
 } from "lucide-react";
 import { AppShell } from "@/components/AppShell";
 import { cn } from "@/lib/utils";
+import { generateVideo } from "@/lib/videoGenerator";
+import { saveProject } from "@/lib/videoStorage";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -74,7 +83,7 @@ const FORMATS = [
   { id: "reel", label: "Reels / Shorts", ratio: "9:16", icon: Smartphone },
   { id: "yt", label: "YouTube", ratio: "16:9", icon: Monitor },
   { id: "tiktok", label: "TikTok", ratio: "9:16", icon: Smartphone },
-];
+] as const;
 
 const SUBTITLE_STYLES = [
   { id: "reel", label: "Reel Pop", desc: "Bold word-by-word" },
@@ -82,11 +91,7 @@ const SUBTITLE_STYLES = [
   { id: "doc", label: "Cinematic", desc: "Lower-third caption" },
 ];
 
-type Stage = {
-  key: string;
-  label: string;
-  icon: React.ComponentType<{ className?: string }>;
-};
+type Stage = { key: string; label: string; icon: React.ComponentType<{ className?: string }> };
 
 const STAGES: Stage[] = [
   { key: "script", label: "Writing viral script", icon: Wand2 },
@@ -97,29 +102,185 @@ const STAGES: Stage[] = [
   { key: "sfx", label: "Mixing sound design", icon: Music2 },
 ];
 
+type GenState = "idle" | "running" | "done" | "error";
+
 function CreatePage() {
   const [prompt, setPrompt] = useState("");
   const [voice, setVoice] = useState("doc");
-  const [format, setFormat] = useState("reel");
+  const [format, setFormat] = useState<(typeof FORMATS)[number]["id"]>("reel");
   const [subs, setSubs] = useState("reel");
-  const [duration, setDuration] = useState(45);
-  const [generating, setGenerating] = useState(false);
-  const [activeStage, setActiveStage] = useState(-1);
-  const [done, setDone] = useState(false);
+  const [duration, setDuration] = useState(20);
+  const [state, setState] = useState<GenState>("idle");
+  const [progress, setProgress] = useState(0);
+  const [activeStageLabel, setActiveStageLabel] = useState<string>("");
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [videoMime, setVideoMime] = useState<string>("video/webm");
+  const [projectId, setProjectId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [eta, setEta] = useState<number>(0);
+  const abortRef = useRef<AbortController | null>(null);
+  const startRef = useRef<number>(0);
 
-  const handleGenerate = async () => {
-    if (!prompt.trim()) return;
-    setGenerating(true);
-    setDone(false);
-    setActiveStage(0);
-    for (let i = 0; i < STAGES.length; i++) {
-      setActiveStage(i);
-      // eslint-disable-next-line no-await-in-loop
-      await new Promise((r) => setTimeout(r, 900));
+  // Cleanup blob URLs on unmount / regeneration
+  useEffect(() => {
+    return () => {
+      if (videoUrl) URL.revokeObjectURL(videoUrl);
+    };
+  }, [videoUrl]);
+
+  const activeStageIdx = useMemo(() => {
+    if (state !== "running") return -1;
+    if (progress < 8) return 0;
+    if (progress < 15) return 1;
+    if (progress < 50) return 2;
+    if (progress < 75) return 3;
+    if (progress < 90) return 4;
+    return 5;
+  }, [progress, state]);
+
+  const handleGenerate = useCallback(async () => {
+    if (!prompt.trim()) {
+      toast.error("Add a topic prompt to get started.");
+      return;
     }
-    setGenerating(false);
-    setDone(true);
-  };
+    if (state === "running") return;
+
+    // Reset previous output
+    if (videoUrl) URL.revokeObjectURL(videoUrl);
+    setVideoUrl(null);
+    setProjectId(null);
+    setError(null);
+    setProgress(0);
+    setState("running");
+    startRef.current = performance.now();
+    setEta(Math.max(8, duration + 4));
+
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+
+    const toastId = toast.loading("Generating your viral video…", {
+      description: "Hold tight — rendering in your browser.",
+    });
+
+    try {
+      const result = await generateVideo({
+        prompt,
+        duration,
+        format,
+        voice,
+        signal: ctrl.signal,
+        onProgress: (pct, stage) => {
+          setProgress(Math.round(pct));
+          setActiveStageLabel(stage);
+          const elapsed = (performance.now() - startRef.current) / 1000;
+          const total = pct > 5 ? (elapsed / pct) * 100 : duration + 4;
+          setEta(Math.max(1, Math.round(total - elapsed)));
+        },
+      });
+
+      const url = URL.createObjectURL(result.video);
+      const id = crypto.randomUUID();
+      setVideoUrl(url);
+      setVideoMime(result.mimeType);
+      setProjectId(id);
+      setState("done");
+      setProgress(100);
+
+      await saveProject({
+        id,
+        title: prompt.length > 70 ? prompt.slice(0, 67) + "…" : prompt,
+        prompt,
+        topic: "Custom",
+        format,
+        duration,
+        voice,
+        createdAt: Date.now(),
+        mimeType: result.mimeType,
+        size: result.video.size,
+        video: result.video,
+        thumbnail: result.thumbnail,
+        script: result.script,
+      });
+
+      toast.success("Video ready!", {
+        id: toastId,
+        description: "Saved to My Projects.",
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Generation failed";
+      if (msg === "Cancelled") {
+        toast.dismiss(toastId);
+        setState("idle");
+        setProgress(0);
+        return;
+      }
+      console.error("[generate]", err);
+      setError(msg);
+      setState("error");
+      toast.error("Generation failed", { id: toastId, description: msg });
+    } finally {
+      abortRef.current = null;
+    }
+  }, [prompt, duration, format, voice, state, videoUrl]);
+
+  const handleCancel = useCallback(() => {
+    abortRef.current?.abort();
+  }, []);
+
+  const handleRetry = useCallback(() => {
+    setError(null);
+    setState("idle");
+    setProgress(0);
+    handleGenerate();
+  }, [handleGenerate]);
+
+  const handleDownload = useCallback(() => {
+    if (!videoUrl) return;
+    const ext = videoMime.includes("mp4") ? "mp4" : "webm";
+    const a = document.createElement("a");
+    a.href = videoUrl;
+    a.download = `eduverse-${Date.now()}.${ext}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    toast.success("Download started");
+  }, [videoUrl, videoMime]);
+
+  const handleCopyLink = useCallback(async () => {
+    if (!projectId) return;
+    const link = `${window.location.origin}/projects?v=${projectId}`;
+    try {
+      await navigator.clipboard.writeText(link);
+      toast.success("Link copied to clipboard");
+    } catch {
+      toast.error("Couldn't copy link");
+    }
+  }, [projectId]);
+
+  const handleShare = useCallback(async () => {
+    if (!videoUrl) return;
+    const link = projectId
+      ? `${window.location.origin}/projects?v=${projectId}`
+      : window.location.href;
+    try {
+      if (navigator.share) {
+        await navigator.share({
+          title: "My EduVerse AI video",
+          text: prompt,
+          url: link,
+        });
+      } else {
+        await navigator.clipboard.writeText(link);
+        toast.success("Link copied — share anywhere");
+      }
+    } catch (err) {
+      if ((err as Error).name !== "AbortError") {
+        toast.error("Sharing failed");
+      }
+    }
+  }, [videoUrl, projectId, prompt]);
+
+  const portrait = format !== "yt";
 
   return (
     <AppShell>
@@ -148,23 +309,27 @@ function CreatePage() {
           {/* Composer */}
           <div className="space-y-6">
             <section className="rounded-2xl glass-strong p-6">
-              <label className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+              <label htmlFor="prompt" className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
                 Your prompt
               </label>
               <textarea
+                id="prompt"
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
                 placeholder="e.g. Explain how WiFi reaches your phone like magic..."
                 rows={4}
-                className="mt-3 w-full resize-none rounded-xl border border-border/60 bg-background/40 p-4 text-base outline-none placeholder:text-muted-foreground/60 focus:border-primary/60 focus:ring-2 focus:ring-primary/30"
+                disabled={state === "running"}
+                className="mt-3 w-full resize-none rounded-xl border border-border/60 bg-background/40 p-4 text-base outline-none placeholder:text-muted-foreground/60 focus:border-primary/60 focus:ring-2 focus:ring-primary/30 disabled:opacity-60"
               />
 
               <div className="mt-4 flex flex-wrap gap-2">
                 {SAMPLE_PROMPTS.map((p) => (
                   <button
+                    type="button"
                     key={p}
                     onClick={() => setPrompt(p)}
-                    className="rounded-full border border-border/60 bg-background/30 px-3 py-1.5 text-xs text-muted-foreground transition hover:border-primary/50 hover:text-foreground"
+                    disabled={state === "running"}
+                    className="rounded-full border border-border/60 bg-background/30 px-3 py-1.5 text-xs text-muted-foreground transition hover:border-primary/50 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {p.length > 60 ? p.slice(0, 57) + "…" : p}
                   </button>
@@ -182,14 +347,17 @@ function CreatePage() {
                       const active = format === f.id;
                       return (
                         <button
+                          type="button"
                           key={f.id}
                           onClick={() => setFormat(f.id)}
+                          disabled={state === "running"}
                           className={cn(
-                            "flex flex-col items-center gap-1 rounded-xl border p-3 text-xs transition",
+                            "flex flex-col items-center gap-1 rounded-xl border p-3 text-xs transition disabled:cursor-not-allowed disabled:opacity-60",
                             active
                               ? "border-primary/70 bg-gradient-primary/15 text-foreground shadow-glow"
                               : "border-border/60 bg-background/30 text-muted-foreground hover:text-foreground",
                           )}
+                          aria-pressed={active}
                         >
                           <Icon className="h-4 w-4" />
                           <span className="font-semibold">{f.label}</span>
@@ -207,17 +375,18 @@ function CreatePage() {
                   </div>
                   <input
                     type="range"
-                    min={15}
-                    max={90}
+                    min={10}
+                    max={60}
                     step={5}
                     value={duration}
                     onChange={(e) => setDuration(Number(e.target.value))}
+                    disabled={state === "running"}
                     className="mt-4 w-full accent-[color:var(--primary)]"
                   />
                   <div className="mt-2 flex justify-between text-[10px] text-muted-foreground">
-                    <span>15s hook</span>
-                    <span>45s explainer</span>
-                    <span>90s deep dive</span>
+                    <span>10s hook</span>
+                    <span>30s explainer</span>
+                    <span>60s deep dive</span>
                   </div>
                 </div>
               </div>
@@ -231,10 +400,13 @@ function CreatePage() {
                     const active = voice === v.id;
                     return (
                       <button
+                        type="button"
                         key={v.id}
                         onClick={() => setVoice(v.id)}
+                        disabled={state === "running"}
+                        aria-pressed={active}
                         className={cn(
-                          "group relative overflow-hidden rounded-xl border p-3 text-left transition",
+                          "group relative overflow-hidden rounded-xl border p-3 text-left transition disabled:cursor-not-allowed disabled:opacity-60",
                           active
                             ? "border-primary/70 shadow-glow"
                             : "border-border/60 hover:border-primary/40",
@@ -269,10 +441,13 @@ function CreatePage() {
                     const active = subs === s.id;
                     return (
                       <button
+                        type="button"
                         key={s.id}
                         onClick={() => setSubs(s.id)}
+                        disabled={state === "running"}
+                        aria-pressed={active}
                         className={cn(
-                          "rounded-xl border p-3 text-left transition",
+                          "rounded-xl border p-3 text-left transition disabled:cursor-not-allowed disabled:opacity-60",
                           active
                             ? "border-primary/70 bg-gradient-primary/15 shadow-glow"
                             : "border-border/60 hover:border-primary/40",
@@ -290,27 +465,49 @@ function CreatePage() {
                 </div>
               </div>
 
-              <button
-                onClick={handleGenerate}
-                disabled={generating || !prompt.trim()}
-                className="group mt-6 flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-primary px-6 py-4 text-base font-semibold text-primary-foreground shadow-glow transition hover:shadow-glow-blue disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {generating ? (
-                  <>
-                    <Loader2 className="h-5 w-5 animate-spin" />
-                    Generating your viral video…
-                  </>
-                ) : (
-                  <>
-                    <Wand2 className="h-5 w-5" />
-                    Generate Video
-                    <Sparkles className="h-4 w-4 opacity-70 transition group-hover:rotate-12" />
-                  </>
-                )}
-              </button>
+              {state === "running" ? (
+                <button
+                  type="button"
+                  onClick={handleCancel}
+                  className="group mt-6 flex w-full items-center justify-center gap-2 rounded-xl border border-destructive/50 bg-destructive/10 px-6 py-4 text-base font-semibold text-destructive-foreground transition hover:bg-destructive/20"
+                >
+                  <X className="h-5 w-5" />
+                  Cancel generation
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleGenerate}
+                  disabled={!prompt.trim()}
+                  className="group mt-6 flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-primary px-6 py-4 text-base font-semibold text-primary-foreground shadow-glow transition hover:shadow-glow-blue disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Wand2 className="h-5 w-5" />
+                  {state === "done" ? "Generate another" : "Generate Video"}
+                  <Sparkles className="h-4 w-4 opacity-70 transition group-hover:rotate-12" />
+                </button>
+              )}
+
+              {error && (
+                <div
+                  role="alert"
+                  className="mt-4 flex items-start gap-3 rounded-xl border border-destructive/40 bg-destructive/10 p-4 text-sm"
+                >
+                  <AlertTriangle className="mt-0.5 h-4 w-4 text-destructive" />
+                  <div className="flex-1">
+                    <div className="font-semibold">Generation failed</div>
+                    <div className="text-xs text-muted-foreground">{error}</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleRetry}
+                    className="flex items-center gap-1 rounded-lg bg-gradient-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground shadow-glow"
+                  >
+                    <RotateCcw className="h-3 w-3" /> Retry
+                  </button>
+                </div>
+              )}
             </section>
 
-            {/* Trending topics */}
             <section className="rounded-2xl glass p-6">
               <div className="flex items-center justify-between">
                 <div>
@@ -326,9 +523,13 @@ function CreatePage() {
                   const Icon = t.icon;
                   return (
                     <button
+                      type="button"
                       key={t.label}
-                      onClick={() => setPrompt(`Explain ${t.label} in a captivating 60-second 3D video.`)}
-                      className="flex items-center gap-2 rounded-xl border border-border/50 bg-background/30 px-3 py-2.5 text-sm transition hover:border-primary/40 hover:bg-background/50"
+                      onClick={() =>
+                        setPrompt(`Explain ${t.label} in a captivating 30-second 3D video.`)
+                      }
+                      disabled={state === "running"}
+                      className="flex items-center gap-2 rounded-xl border border-border/50 bg-background/30 px-3 py-2.5 text-sm transition hover:border-primary/40 hover:bg-background/50 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       <Icon className="h-4 w-4 text-neon-blue" />
                       {t.label}
@@ -343,65 +544,139 @@ function CreatePage() {
           <div className="space-y-6">
             <section className="rounded-2xl glass-strong p-6">
               <div className="flex items-center justify-between">
-                <div className="text-sm font-semibold">Live preview</div>
+                <div className="text-sm font-semibold">
+                  {state === "done" ? "Your video" : "Live preview"}
+                </div>
                 <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
-                  {format === "yt" ? "16 : 9" : "9 : 16"}
+                  {portrait ? "9 : 16" : "16 : 9"}
                 </div>
               </div>
 
               <div
                 className={cn(
-                  "relative mx-auto mt-4 overflow-hidden rounded-2xl border border-border/50",
-                  format === "yt" ? "aspect-video w-full" : "aspect-[9/16] max-w-[260px]",
+                  "relative mx-auto mt-4 overflow-hidden rounded-2xl border border-border/50 bg-black",
+                  portrait ? "aspect-[9/16] max-w-[260px]" : "aspect-video w-full",
                 )}
-                style={{
-                  background:
-                    "radial-gradient(ellipse at 30% 20%, oklch(0.45 0.22 290 / 60%), transparent 60%), radial-gradient(ellipse at 80% 90%, oklch(0.50 0.22 240 / 60%), transparent 60%), oklch(0.12 0.04 270)",
-                }}
               >
-                {/* Faux 3d scene */}
-                <div className="absolute inset-0 flex items-center justify-center">
-                  <div className="relative h-32 w-32">
-                    <div className="absolute inset-0 animate-pulse-glow rounded-full bg-gradient-primary opacity-60 blur-2xl" />
-                    <div className="absolute inset-2 animate-float rounded-full border-2 border-white/20" />
-                    <div className="absolute inset-6 rounded-full bg-gradient-primary shadow-glow" />
-                  </div>
-                </div>
-
-                {/* Hook text */}
-                <div className="absolute left-3 right-3 top-3">
-                  <div className="inline-flex items-center gap-1 rounded-full bg-black/40 px-2 py-0.5 text-[10px] font-semibold backdrop-blur">
-                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-red-500" /> HOOK
-                  </div>
-                </div>
-
-                {/* Subtitle preview */}
-                <div className="absolute inset-x-3 bottom-4 text-center">
-                  <div className="inline-block rounded-lg bg-black/60 px-3 py-1.5 text-sm font-bold backdrop-blur">
-                    Your <span className="text-neon-purple">message</span> travels…
-                  </div>
-                </div>
-
-                {!generating && (
-                  <button className="absolute inset-0 flex items-center justify-center">
-                    <div className="flex h-14 w-14 items-center justify-center rounded-full bg-white/20 backdrop-blur shadow-glow">
-                      <Play className="h-6 w-6 translate-x-0.5 fill-white text-white" />
+                {videoUrl && state === "done" ? (
+                  <video
+                    key={videoUrl}
+                    src={videoUrl}
+                    controls
+                    autoPlay
+                    playsInline
+                    preload="auto"
+                    className="h-full w-full bg-black"
+                  >
+                    <track kind="captions" />
+                  </video>
+                ) : (
+                  <div
+                    className="absolute inset-0"
+                    style={{
+                      background:
+                        "radial-gradient(ellipse at 30% 20%, oklch(0.45 0.22 290 / 60%), transparent 60%), radial-gradient(ellipse at 80% 90%, oklch(0.50 0.22 240 / 60%), transparent 60%), oklch(0.12 0.04 270)",
+                    }}
+                  >
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <div className="relative h-32 w-32">
+                        <div className="absolute inset-0 animate-pulse-glow rounded-full bg-gradient-primary opacity-60 blur-2xl" />
+                        <div className="absolute inset-2 animate-float rounded-full border-2 border-white/20" />
+                        <div className="absolute inset-6 rounded-full bg-gradient-primary shadow-glow" />
+                      </div>
                     </div>
-                  </button>
+                    <div className="absolute left-3 right-3 top-3">
+                      <div className="inline-flex items-center gap-1 rounded-full bg-black/40 px-2 py-0.5 text-[10px] font-semibold backdrop-blur">
+                        <span
+                          className={cn(
+                            "h-1.5 w-1.5 rounded-full",
+                            state === "running"
+                              ? "animate-pulse bg-red-500"
+                              : "bg-white/60",
+                          )}
+                        />
+                        {state === "running" ? "RENDERING" : "PREVIEW"}
+                      </div>
+                    </div>
+                    <div className="absolute inset-x-3 bottom-4 text-center">
+                      <div className="inline-block rounded-lg bg-black/60 px-3 py-1.5 text-sm font-bold backdrop-blur">
+                        {prompt.trim()
+                          ? prompt.length > 40
+                            ? prompt.slice(0, 37) + "…"
+                            : prompt
+                          : "Your message travels…"}
+                      </div>
+                    </div>
+                    {state === "running" && (
+                      <div className="absolute inset-x-0 bottom-0 h-1 shimmer" />
+                    )}
+                  </div>
                 )}
-
-                {generating && <div className="absolute inset-x-0 bottom-0 h-1 shimmer" />}
               </div>
 
-              {done && (
-                <div className="mt-4 flex gap-2">
-                  <button className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-gradient-primary py-2 text-sm font-semibold text-primary-foreground shadow-glow">
-                    <Download className="h-4 w-4" /> Export MP4
-                  </button>
-                  <button className="flex items-center justify-center gap-2 rounded-lg border border-border/60 bg-background/30 px-3 py-2 text-sm">
-                    <Share2 className="h-4 w-4" />
-                  </button>
+              {state === "running" && (
+                <div className="mt-4 space-y-2">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-semibold">{activeStageLabel || "Starting…"}</span>
+                    <span className="text-muted-foreground">
+                      {progress}% · ~{eta}s left
+                    </span>
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-background/40">
+                    <div
+                      className="h-full rounded-full bg-gradient-primary shadow-glow transition-[width] duration-200"
+                      style={{ width: `${progress}%` }}
+                    />
+                  </div>
                 </div>
+              )}
+
+              {state === "done" && (
+                <div className="mt-4 space-y-2">
+                  <div className="flex items-center gap-2 text-xs text-emerald-400">
+                    <CheckCircle2 className="h-4 w-4" /> Saved to My Projects
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={handleDownload}
+                      className="flex items-center justify-center gap-2 rounded-lg bg-gradient-primary py-2 text-sm font-semibold text-primary-foreground shadow-glow"
+                    >
+                      <Download className="h-4 w-4" /> Download
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleShare}
+                      className="flex items-center justify-center gap-2 rounded-lg border border-border/60 bg-background/30 py-2 text-sm"
+                    >
+                      <Share2 className="h-4 w-4" /> Share
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleCopyLink}
+                      className="flex items-center justify-center gap-2 rounded-lg border border-border/60 bg-background/30 py-2 text-sm"
+                    >
+                      <LinkIcon className="h-4 w-4" /> Copy link
+                    </button>
+                    <Link
+                      to="/projects"
+                      className="flex items-center justify-center gap-2 rounded-lg border border-border/60 bg-background/30 py-2 text-sm"
+                    >
+                      <FolderOpen className="h-4 w-4" /> Open project
+                    </Link>
+                  </div>
+                </div>
+              )}
+
+              {state === "idle" && !videoUrl && (
+                <button
+                  type="button"
+                  onClick={handleGenerate}
+                  disabled={!prompt.trim()}
+                  className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg border border-border/60 bg-background/30 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Play className="h-4 w-4" /> Render preview
+                </button>
               )}
             </section>
 
@@ -410,8 +685,9 @@ function CreatePage() {
               <div className="mt-4 space-y-3">
                 {STAGES.map((s, i) => {
                   const Icon = s.icon;
-                  const active = generating && activeStage === i;
-                  const complete = (done && i <= STAGES.length - 1) || (generating && i < activeStage);
+                  const active = state === "running" && activeStageIdx === i;
+                  const complete =
+                    state === "done" || (state === "running" && i < activeStageIdx);
                   return (
                     <div
                       key={s.key}
@@ -423,15 +699,15 @@ function CreatePage() {
                       <div
                         className={cn(
                           "flex h-8 w-8 items-center justify-center rounded-lg",
-                          complete
+                          complete || active
                             ? "bg-gradient-primary text-primary-foreground"
-                            : active
-                              ? "bg-gradient-primary text-primary-foreground"
-                              : "bg-muted/60 text-muted-foreground",
+                            : "bg-muted/60 text-muted-foreground",
                         )}
                       >
                         {active ? (
                           <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : complete ? (
+                          <CheckCircle2 className="h-4 w-4" />
                         ) : (
                           <Icon className="h-4 w-4" />
                         )}
